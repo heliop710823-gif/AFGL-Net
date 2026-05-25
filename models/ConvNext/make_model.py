@@ -8,6 +8,86 @@ from .backbones.resnet import Resnet
 import numpy as np
 from torch.nn import init
 from torch.nn.parameter import Parameter
+import torch.fft as fft
+
+class DCTFrequencyEnhance(object):
+    def __init__(self, low_freq_ratio=0.3, high_freq_boost=1.5):
+        self.low_freq_ratio = low_freq_ratio
+        self.beta = high_freq_boost
+
+    def __call__(self, x):
+        h, w = x.shape[-2:]
+        thresh_h = int(h * self.low_freq_ratio)
+        thresh_w = int(w * self.low_freq_ratio)       
+        x_dct = dct_2d(x)    
+        low_freq_mask = torch.zeros_like(x_dct)
+        low_freq_mask[..., :thresh_h, :thresh_w] = 1     
+        low_freq = x_dct * low_freq_mask
+        high_freq = (x_dct - low_freq) * self.beta   
+        fused_dct = low_freq + high_freq
+        return idct_2d(fused_dct)
+def dct1(x):
+    x_shape = x.shape
+    x = x.view(-1, x_shape[-1])
+    return torch.fft.fft(torch.cat([x, x.flip([1])[:, 1:-1]], dim=1), 1).real.view(*x_shape)
+def idct1(X):
+    n = X.shape[-1]
+    return dct1(X) / (2 * (n - 1))
+def dct(x, norm=None):
+    x_shape = x.shape
+    N = x_shape[-1]
+    x = x.contiguous().view(-1, N)
+    v = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
+    Vc = torch.fft.fft(v)
+    k = - torch.arange(N, dtype=x.dtype, device=x.device)[None, :] * np.pi / (2 * N)
+    W_r = torch.cos(k)
+    W_i = torch.sin(k)
+    # V = Vc[:, :, 0] * W_r - Vc[:, :, 1] * W_i
+    V = Vc.real * W_r - Vc.imag * W_i
+    if norm == 'ortho':
+        V[:, 0] /= np.sqrt(N) * 2
+        V[:, 1:] /= np.sqrt(N / 2) * 2
+    V = 2 * V.view(*x_shape)
+    return V
+def idct(X, norm=None):
+    x_shape = X.shape
+    N = x_shape[-1]
+    X_v = X.contiguous().view(-1, x_shape[-1]) / 2
+    if norm == 'ortho':
+        X_v[:, 0] *= np.sqrt(N) * 2
+        X_v[:, 1:] *= np.sqrt(N / 2) * 2
+    k = torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :] * np.pi / (2 * N)
+    W_r = torch.cos(k)
+    W_i = torch.sin(k)
+    V_t_r = X_v
+    V_t_i = torch.cat([X_v[:, :1] * 0, -X_v.flip([1])[:, :-1]], dim=1)
+    V_r = V_t_r * W_r - V_t_i * W_i
+    V_i = V_t_r * W_i + V_t_i * W_r
+    V = torch.cat([V_r.unsqueeze(2), V_i.unsqueeze(2)], dim=2)
+    tmp = torch.complex(real=V[:, :, 0], imag=V[:, :, 1])
+    v = torch.fft.ifft(tmp)
+    x = v.new_zeros(v.shape)
+    x[:, ::2] += v[:, :N - (N // 2)]
+    x[:, 1::2] += v.flip([1])[:, :N // 2]
+    return x.view(*x_shape).real
+def dct_2d(x, norm=None):
+    X1 = dct(x, norm=norm)
+    X2 = dct(X1.transpose(-1, -2), norm=norm)
+    return X2.transpose(-1, -2)
+def idct_2d(X, norm=None):
+    x1 = idct(X, norm=norm)
+    x2 = idct(x1.transpose(-1, -2), norm=norm)
+    return x2.transpose(-1, -2)
+def dct_3d(x, norm=None):
+    X1 = dct(x, norm=norm)
+    X2 = dct(X1.transpose(-1, -2), norm=norm)
+    X3 = dct(X2.transpose(-1, -3), norm=norm)
+    return X3.transpose(-1, -3).transpose(-1, -2)
+def idct_3d(X, norm=None):
+    x1 = idct(X, norm=norm)
+    x2 = idct(x1.transpose(-1, -2), norm=norm)
+    x3 = idct(x2.transpose(-1, -3), norm=norm)
+    return x3.transpose(-1, -3).transpose(-1, -2)
 
 
 class Gem_heat(nn.Module):
@@ -75,9 +155,9 @@ def weights_init_classifier(m):
         nn.init.constant_(m.bias.data, 0.0)
 
 
-class BasicConv_For_DSAB(nn.Module):
+class BasicConv_For_ADIB(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, relu=True, bn=True, bias=False):
-        super(BasicConv_For_DSAB, self).__init__()
+        super(BasicConv_For_ADIB, self).__init__()
         self.out_channels = out_planes
 
         self.conv = nn.Conv2d(in_planes, in_planes, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias)
@@ -120,7 +200,7 @@ class AttentionGate(nn.Module):
         super(AttentionGate, self).__init__()
         kernel_size = 7
         self.compress = ADPool()
-        self.conv = BasicConv_For_DSAB(1, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False)
+        self.conv = BasicConv_For_ADIB(1, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False)
 
     def forward(self, x):
         x_compress = self.compress(x)
@@ -129,129 +209,20 @@ class AttentionGate(nn.Module):
         return x * scale
 
 
-class LSK_AttentionGate_Strip(nn.Module):
-    def __init__(self, k_list=[5, 7], d_list=[1, 3]):
-        super().__init__()
-        self.conv0 = nn.Conv2d(1, 1, kernel_size=k_list[0], padding=(k_list[0]-1)//2, bias=False)
-        self.conv1 = nn.Conv2d(1, 1, kernel_size=k_list[1], padding=d_list[1]*(k_list[1]-1)//2, dilation=d_list[1], bias=False)
-        self.conv_select = nn.Conv2d(2, 2, kernel_size=1) 
-    def forward(self, x):
-        # x: [B, 1, H, W]
-        u1 = self.conv0(x)
-        u2 = self.conv1(u1)
-        u_concat = torch.cat([u1, u2], dim=1)
-        sa_avg = torch.mean(u_concat, dim=1, keepdim=True)
-        sa_max, _ = torch.max(u_concat, dim=1, keepdim=True)
-        attn_map = torch.sigmoid(self.conv_select(torch.cat([sa_avg, sa_max], dim=1)))
-        res = u1 * attn_map[:, 0:1, ...] + u2 * attn_map[:, 1:2, ...]
-        return torch.sigmoid(res)
-
-class DSAB_block(nn.Module):
-    def __init__(self, in_planes=1024):
-        super(DSAB_block, self).__init__()
-        # 四个方向的门控
-        self.gate_h = LSK_AttentionGate_Strip() # 水平
-        self.gate_v = LSK_AttentionGate_Strip() # 垂直
-        self.gate_d = LSK_AttentionGate_Strip() # 对角线
-        self.gate_a = LSK_AttentionGate_Strip() # 反对角线
-        # 融合偏置
-        self.fusion_bias = nn.Parameter(torch.zeros(1))
-    def _project_diag_to_2d(self, diag_tensor, B, C, H, W, mode='diag'):
-        spatial_mask = torch.zeros((B, 1, H, W), device=diag_tensor.device, dtype=diag_tensor.dtype)
-        L = diag_tensor.shape[-1]
-        # 简单的索引保护，防止尺寸不匹配
-        limit = min(H, W, L)
-        if mode == 'diag':
-            indices = torch.arange(limit, device=diag_tensor.device)
-            spatial_mask[:, :, indices, indices] = diag_tensor[:, :, :, :limit].squeeze(2)
-        elif mode == 'anti':
-            indices_h = torch.arange(limit, device=diag_tensor.device)
-            indices_w = torch.arange(limit, device=diag_tensor.device).flip(0)
-            spatial_mask[:, :, indices_h, indices_w] = diag_tensor[:, :, :, :limit].squeeze(2)
-        return spatial_mask
+class ADIB_block(nn.Module):
+    def __init__(self):
+        super(ADIB_block, self).__init__()
+        self.cw = AttentionGate()
+        self.hc = AttentionGate()
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        L_diag = min(H, W)
-        x_h_spatial = x.mean(dim=3, keepdim=True).mean(dim=1, keepdim=True) # [B, 1, H, 1]
-        attn_h = self.gate_h(x_h_spatial) # [B, 1, H, 1]
-        x_v_spatial = x.mean(dim=2, keepdim=True).mean(dim=1, keepdim=True) # [B, 1, 1, W]
-        attn_v = self.gate_v(x_v_spatial) # [B, 1, 1, W]
-        raw_diag = torch.diagonal(x, dim1=2, dim2=3) 
-        x_d_spatial = raw_diag.mean(dim=1, keepdim=True).unsqueeze(2) # [B, 1, 1, L]
-        attn_d = self.gate_d(x_d_spatial) # [B, 1, 1, L]
-        raw_anti = torch.diagonal(x.flip(3), dim1=2, dim2=3) 
-        x_a_spatial = raw_anti.mean(dim=1, keepdim=True).unsqueeze(2) # [B, 1, 1, L]
-        attn_a = self.gate_a(x_a_spatial) # [B, 1, 1, L]
-        map_d = self._project_diag_to_2d(attn_d, B, 1, H, W, mode='diag')
-        map_a = self._project_diag_to_2d(attn_a, B, 1, H, W, mode='anti')
-        diag_context = map_d + map_a # [B, 1, H, W]
-        out_h = x * attn_h * (1 + self.fusion_bias * diag_context)
-        out_v = x * attn_v * (1 + self.fusion_bias * diag_context)
-        return out_h, out_v
-class SemanticAdapter(nn.Module):
-    def __init__(self, dim):
-        super(SemanticAdapter, self).__init__()
-        self.dim = dim
-        self.linear1 = nn.Linear(dim, dim)
-        self.ln = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=4, batch_first=True)
-        self.linear2 = nn.Linear(dim, dim)
-        self.bn = nn.BatchNorm1d(dim) 
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        x_flat = x.flatten(2).transpose(1, 2)
-        residual = x_flat
-        x_proj = self.linear1(x_flat)
-        x_norm = self.ln(x_proj)
-        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm)
-        x_out = residual + attn_out
-        x_out = self.linear2(x_out).transpose(1, 2)
-        x_out = self.bn(x_out)
-        x_out = x_out.view(b, c, h, w)
-        return x_out
-
-class MultiHeadSpatialGate(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(MultiHeadSpatialGate, self).__init__()
-        self.head1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.head2 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.head3 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=2, dilation=2, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.fusion = nn.Conv2d(out_channels * 3, out_channels, kernel_size=1, bias=False)
-        self.bn_fusion = nn.BatchNorm2d(out_channels)
-
-    def forward(self, x):
-        h1 = self.head1(x)
-        h2 = self.head2(x)
-        h3 = self.head3(x)
-        combined = torch.cat([h1, h2, h3], dim=1)
-        out = self.fusion(combined)
-        out = self.bn_fusion(out)
-        return F.relu(out, inplace=True) 
-
-class SSMA(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(SSMA, self).__init__()
-        self.semantic_adapter = SemanticAdapter(in_channels)
-        self.multiscale_gate = MultiHeadSpatialGate(in_channels, out_channels)
-
-    def forward(self, x):
-        x_refined = self.semantic_adapter(x)
-        x_att = self.multiscale_gate(x_refined)
-        return x_att
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        x_out1 = self.cw(x_perm1)
+        x_out11 = x_out1.permute(0, 2, 1, 3).contiguous()
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()
+        x_out2 = self.hc(x_perm2)
+        x_out21 = x_out2.permute(0, 3, 2, 1).contiguous()
+        return x_out11, x_out21
 
 class ClassBlock(nn.Module):
     def __init__(self, input_dim, class_num, droprate, relu=False, bnorm=True, num_bottleneck=512, linear=True,
@@ -293,7 +264,6 @@ class ClassBlock(nn.Module):
         else:
             return x
 
-
 class Attentions(nn.Module):
 
     def __init__(self, in_channels, out_channels, **kwargs):
@@ -307,50 +277,66 @@ class Attentions(nn.Module):
         return F.relu(x, inplace=True)
 
 
-class BAP(nn.Module):
-    def __init__(self, pool='GAP'):
+class AdaptiveCounterfactualGenerator(nn.Module):
+    def __init__(self, M=32, noise_sigma=0.1):
+        super(AdaptiveCounterfactualGenerator, self).__init__()
+        self.M = M
+        self.noise_sigma = nn.Parameter(torch.tensor(noise_sigma))
+        self.generator = nn.Sequential(
+            nn.Conv2d(M, M, kernel_size=1, bias=False),
+            nn.BatchNorm2d(M),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(M, M, kernel_size=1, bias=False),
+            nn.Sigmoid()
+        )
+        self.generator.apply(lambda m: nn.init.kaiming_normal_(m.weight) if isinstance(m, nn.Conv2d) else None)
+
+    def forward(self, attentions):
+        B, M, H, W = attentions.size()
+        base_cf = 1.0 - attentions
+        gen_cf = self.generator(base_cf)
+        if self.training:
+            noise = torch.randn_like(gen_cf) * self.noise_sigma
+            gen_cf = torch.clamp(gen_cf + noise, 0, 1)
+        return gen_cf
+
+class BAP(nn.Module): 
+    def __init__(self, pool='GAP', M=32):
         super(BAP, self).__init__()
         assert pool in ['GAP', 'GMP']
         if pool == 'GAP':
             self.pool = None
         else:
             self.pool = nn.AdaptiveMaxPool2d(1)
+        self.acag = AdaptiveCounterfactualGenerator(M=32, noise_sigma=0.1)
 
     def forward(self, features, attentions):
         B, C, H, W = features.size()
         _, M, AH, AW = attentions.size()
-
-        # match size
         if AH != H or AW != W:
-            attentions = F.upsample_bilinear(attentions, size=(H, W))
-
-        # feature_matrix: (B, M, C) -> (B, M * C)
+            attentions = F.interpolate(attentions, size=(H, W), mode='bilinear', align_corners=False)
         if self.pool is None:
-            feature_matrix = (torch.einsum('imjk,injk->imn', (attentions, features)) / float(H * W)).view(B,
-                                                                                                          -1)
+            feature_matrix = (torch.einsum('b m h w, b c h w -> b m c', attentions, features) / float(H * W)).view(B, -1)
         else:
             feature_matrix = []
             for i in range(M):
                 AiF = self.pool(features * attentions[:, i:i + 1, ...]).view(B, -1)
                 feature_matrix.append(AiF)
             feature_matrix = torch.cat(feature_matrix, dim=1)
-
-        # sign-sqrt
         feature_matrix_raw = torch.sign(feature_matrix) * torch.sqrt(torch.abs(feature_matrix) + 1e-6)
-
-        # l2 normalization along dimension M and C
         feature_matrix = F.normalize(feature_matrix_raw, dim=-1)
-
-        if self.training:
-            fake_att = torch.zeros_like(attentions).uniform_(0, 2)
+        fake_att = self.acag(attentions)
+        if self.pool is None:
+            counterfactual_feature = (torch.einsum('b m h w, b c h w -> b m c', fake_att, features) / float(H * W)).view(B, -1)
         else:
-            fake_att = torch.ones_like(attentions)
-        counterfactual_feature = (torch.einsum('imjk,injk->imn', (fake_att, features)) / float(H * W)).view(B, -1)
+            counterfactual_feature = []
+            for i in range(M):
+                AiF_cf = self.pool(features * fake_att[:, i:i + 1, ...]).view(B, -1)
+                counterfactual_feature.append(AiF_cf)
+            counterfactual_feature = torch.cat(counterfactual_feature, dim=1)
+        counterfactual_feature_raw = torch.sign(counterfactual_feature) * torch.sqrt(torch.abs(counterfactual_feature) + 1e-6)
+        counterfactual_feature = F.normalize(counterfactual_feature_raw, dim=-1)
 
-        counterfactual_feature = torch.sign(counterfactual_feature) * torch.sqrt(
-            torch.abs(counterfactual_feature) + 1e-6)
-
-        counterfactual_feature = F.normalize(counterfactual_feature, dim=-1)
         return feature_matrix, counterfactual_feature
 
 
@@ -361,7 +347,7 @@ class CIB_block(nn.Module):
         self.block = block
         self.M = M
         self.bap = BAP(pool='GAP')
-        self.attentions = SSMA(self.in_planes, self.M)
+        self.attentions = Attentions(self.in_planes, self.M, kernel_size=1)
 
     def forward(self, x):
         part = {}
@@ -369,16 +355,15 @@ class CIB_block(nn.Module):
         part_normal_feature = {}
         part_counterfactual_feature = {}
         for i in range(self.block):
-            # part[i] = x[:, :, i].view(x.size(0), -1)
             part[i] = x[:, :, :, :, i]
             part_attention_maps[i] = self.attentions(part[i])  # attention_maps[8,32,8,8]
             part_normal_feature[i], part_counterfactual_feature[i] = self.bap(part[i], part_attention_maps[i])
         return part_normal_feature, part_counterfactual_feature
 
 
-class build_MDS(nn.Module):
+class build_CCR(nn.Module):
     def __init__(self, num_classes, block=4, M=32, return_f=False, resnet=False):
-        super(build_MDS, self).__init__()
+        super(build_CCR, self).__init__()
         self.return_f = return_f
         if resnet:
             resnet_name = "resnet50"
@@ -396,14 +381,13 @@ class build_MDS(nn.Module):
                 self.in_planes = 2048
             else:
                 self.in_planes = 768
-            # 直接导入convnext_base函数
-            from .backbones.model_convnext import convnext_base
-            self.backbone = convnext_base(pretrained=True)
+            self.backbone = create_model(convnext_name, pretrained=True)
 
         self.num_classes = num_classes
         self.block = block
         self.M = M
-        self.DSAB_layer = DSAB_block()
+        self.ADIB_layer = ADIB_block()
+        self.dct = DCTFrequencyEnhance() 
         self.CIB_layer = CIB_block(self.in_planes, self.block, self.M)
         self.classifier1 = ClassBlock(self.in_planes, num_classes, 0.5, return_f=return_f)
         for i in range(self.block * 2):
@@ -411,19 +395,15 @@ class build_MDS(nn.Module):
             setattr(self, name, ClassBlock(self.in_planes * self.M, num_classes, 0.5, return_f=self.return_f))
 
     def forward(self, x):
+        x = self.dct(x)
         gap_feature, part_features = self.backbone(x)
-        DSAB_features = self.DSAB_layer(part_features)
+        ADIB_features = self.ADIB_layer(part_features)
         convnext_feature = self.classifier1(gap_feature)
-        # DSAB_features 是 (out_h, out_v) 元组
-        DSAB_list = list(DSAB_features)
-        # 确保 DSAB_list 长度至少为 block
-        while len(DSAB_list) < self.block:
-            # 重复最后一个元素
-            DSAB_list.append(DSAB_list[-1])
-        # 只取前 block 个元素
-        DSAB_list = DSAB_list[:self.block]
-        DSAB_attention_features = torch.stack(DSAB_list, dim=4)
-        nfeature, cfeature = self.CIB_layer(DSAB_attention_features)
+        ADIB_list = []
+        for i in range(self.block):
+            ADIB_list.append(ADIB_features[i])
+        ADIB_attention_features = torch.stack(ADIB_list, dim=4)
+        nfeature, cfeature = self.CIB_layer(ADIB_attention_features)
 
         if self.block == 0:
             y = []
@@ -457,42 +437,19 @@ class build_MDS(nn.Module):
             name_counterfactual = cls_name + str(i + 1 + block)
             c_name_counterfactual = getattr(self, name_counterfactual)
             counterfactual_classifier = c_name_counterfactual(cf[i])
-            
-            # 处理返回格式，确保有两个元素
-            if isinstance(predict_normal[i], tuple) and len(predict_normal[i]) == 2:
-                pred_cls, pred_feat = predict_normal[i]
-            else:
-                pred_cls = predict_normal[i]
-                pred_feat = torch.zeros_like(pred_cls)
-            
-            if isinstance(counterfactual_classifier, tuple) and len(counterfactual_classifier) == 2:
-                cf_cls, cf_feat = counterfactual_classifier
-            else:
-                cf_cls = counterfactual_classifier
-                cf_feat = torch.zeros_like(cf_cls)
-            
-            predict_counterfactual[i] = (pred_cls - cf_cls, pred_feat - cf_feat)
-        
+            predict_counterfactual[i] = (
+            predict_normal[i][0] - counterfactual_classifier[0], predict_normal[i][1] - counterfactual_classifier[1])
         y_normal = []
         y_counterfactual = []
         for i in range(block):
             y_normal.append(predict_normal[i])
             y_counterfactual.append(predict_counterfactual[i])
-        
         if not self.training:
-            # 只取分类结果
-            y_normal_cls = []
-            for pred in y_normal:
-                if isinstance(pred, tuple) and len(pred) == 2:
-                    y_normal_cls.append(pred[0])
-                else:
-                    y_normal_cls.append(pred)
-            return torch.stack(y_normal_cls, dim=2)
-        
+            return torch.stack(y_normal, dim=2)
         return y_normal, y_counterfactual
 
 
-def make_MDS_model(num_class, block=4, M=32, return_f=False, resnet=False):
+def make_CCR_model(num_class, block=4, M=32, return_f=False, resnet=False):
     print('===========building convnext===========')
-    model = build_MDS(num_class, block=block, M=M, return_f=return_f, resnet=resnet)
+    model = build_CCR(num_class, block=block, M=M, return_f=return_f, resnet=resnet)
     return model

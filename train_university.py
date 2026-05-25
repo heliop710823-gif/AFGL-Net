@@ -21,6 +21,7 @@ from shutil import copyfile
 from utils import get_model_list, load_network, save_network, make_weights_for_balanced_classes
 from optimizers.make_optimizer import make_optimizer
 from losses.triplet_loss import Tripletloss, TripletLoss
+from losses.DRCE import symmetric_cross_entropy
 from losses.cal_loss import cal_kl_loss, cal_loss, cal_triplet_loss
 from models.model import make_model
 

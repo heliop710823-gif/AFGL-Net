@@ -132,7 +132,7 @@ def train_model(model, opt, model_test, optimizer, scheduler, num_epochs=25):
     since = time.time()
 
     scaler = GradScaler()
-    criterion = nn.CrossEntropyLoss()
+    criterion = symmetric_cross_entropy()
     loss_kl = nn.KLDivLoss(reduction='batchmean')
     triplet_loss = Tripletloss(margin=0.2, gamma=32)
 

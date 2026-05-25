@@ -1,0 +1,13 @@
+def symmetric_cross_entropy(outputs, labels, alpha=1.0, beta=0.1):  # 调整参数比例
+    ce = F.cross_entropy(outputs, labels, reduction='none')
+    
+    probs = F.softmax(outputs, dim=-1)
+    targets_one_hot = F.one_hot(labels, num_classes=outputs.size(-1)).float()
+    
+    # 更安全的数值处理
+    probs_clamped = torch.clamp(probs, min=1e-10, max=1.0)
+    targets_clamped = torch.clamp(targets_one_hot, min=1e-10, max=1.0)
+    
+    rce = -torch.sum(probs_clamped * torch.log(targets_clamped), dim=1)
+    
+    return (alpha * ce + beta * rce).mean()

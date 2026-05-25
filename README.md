@@ -31,7 +31,7 @@ bash run_sues.sh
 Download [University-1652](https://github.com/layumi/University1652-Baseline) upon request and put them under the `./data/` folder. You may use the request [template](https://github.com/layumi/University1652-Baseline/blob/master/Request.md).
 Download [SUES-200](https://github.com/Reza-Zhu/SUES-200-Benchmark) upon request and put them under the `./data/` folder.
 ## Model weights
-This is our weight download address. If you want to use it, please download and unzip it and put it in the root directory of the MDS-Net project.
+This is our weight download address. If you want to use it, please download and unzip it and put it in the root directory of the AFGL-Net project.
 Address: [Here (Baidu Cloud Disk)](https://pan.baidu.com/s/1yE6c2gvY6Iv6riHDLtOxaw) Extraction code: 0000
 
 ## Reference

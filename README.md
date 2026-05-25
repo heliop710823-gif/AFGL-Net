@@ -1,6 +1,6 @@
-# [MADA-SSA] Multi-Axis Directional Attention and Spatial-Semantic Aggregation for Robust Drone-to-Satellite Geo-Localization
+# [AFGL-Net] Adversarial Frequency Geo-Localization Network for Robust Cross-View Geo-Localization Alignment
 
-Code for MDS-Net.
+Code for AFGL-Net.
 
 ## Prerequisites
 

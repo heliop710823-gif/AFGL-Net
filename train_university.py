@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function, division
+
 import argparse
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from datasets.make_dataloader_university import make_dataset
 import torch.backends.cudnn as cudnn
 import matplotlib
@@ -19,11 +20,9 @@ import yaml
 from shutil import copyfile
 from utils import get_model_list, load_network, save_network, make_weights_for_balanced_classes
 from optimizers.make_optimizer import make_optimizer
-from losses.triplet_loss import Tripletloss
+from losses.triplet_loss import Tripletloss, TripletLoss
 from losses.cal_loss import cal_kl_loss, cal_loss, cal_triplet_loss
 from models.model import make_model
-from losses.CERE import symmetric_cross_entropy
-
 
 
 version = torch.__version__
@@ -132,9 +131,10 @@ def train_model(model, opt, model_test, optimizer, scheduler, num_epochs=25):
     since = time.time()
 
     scaler = GradScaler()
+    criterion = symmetric_cross_entropy()
     loss_kl = nn.KLDivLoss(reduction='batchmean')
-    triplet_loss = Tripletloss(margin=0.35, gamma=32)
-    criterion = nn.CrossEntropyLoss()
+    triplet_loss = Tripletloss(margin=opt.triplet_loss)
+
     min_loss = 1.0
 
     warm_up = 0.1  # We start from the 0.1*lrRate
@@ -220,7 +220,7 @@ def train_model(model, opt, model_test, optimizer, scheduler, num_epochs=25):
 
                 kl_loss = torch.tensor((0))
                 if opt.views == 2:
-                    cls_loss = cal_loss(outputs, labels, symmetric_cross_entropy) + cal_loss(outputs2, labels3, symmetric_cross_entropy)
+                    cls_loss = cal_loss(outputs, labels, criterion) + cal_loss(outputs2, labels3, criterion)
                     if opt.kl_loss:
                         kl_loss = cal_kl_loss(outputs, outputs2, loss_kl)
                 elif opt.views == 3:

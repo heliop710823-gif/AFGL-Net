@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from torch.cuda.amp import autocast, GradScaler
-from datasets.make_dataloader_sues import make_dataset
+from datasets.make_dataloader_university import make_dataset
 import torch.backends.cudnn as cudnn
 import matplotlib
 
@@ -20,10 +20,12 @@ import yaml
 from shutil import copyfile
 from utils import get_model_list, load_network, save_network, make_weights_for_balanced_classes
 from optimizers.make_optimizer import make_optimizer
-from losses.triplet_loss import Tripletloss
+from losses.triplet_loss import Tripletloss, TripletLoss
+from losses.DRCE import symmetric_cross_entropy
 from losses.cal_loss import cal_kl_loss, cal_loss, cal_triplet_loss
 from models.model import make_model
-from losses.CERE import symmetric_cross_entropy
+
+
 version = torch.__version__
 # fp16
 try:
@@ -32,7 +34,6 @@ try:
 except ImportError:  # will be 3.x series
     print(
         'This is not an error. If you want to use low precision, i.e., fp16, please install the apex with cuda support (https://github.com/NVIDIA/apex) and update pytorch to 1.0')
-
 ######################################################################
 # Options
 # --------
